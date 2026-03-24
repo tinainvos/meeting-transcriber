@@ -51,8 +51,11 @@ export async function POST(request: NextRequest) {
     // Parse transcript lines
     const lines = (stdout + stderr)
       .split("\n")
-      .filter((line) => line.match(/^\[[\d:.]+\s*-->/))
-      .map((line) => line.trim())
+      .map((line) => {
+        const match = line.trim().match(/^\[(\d+):(\d+):(\d+)\.\d+\s*-->.*?\]\s*(.*)/);
+        return match ? `${match[1]}:${match[2]}:${match[3]} ${match[4].trim()}` : null;
+      })
+      .filter(Boolean)
       .join("\n");
 
     return NextResponse.json({ text: lines || "（無法辨識內容）" });

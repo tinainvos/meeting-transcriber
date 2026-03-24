@@ -1,6 +1,14 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Separator } from "@/components/ui/separator";
+import { Panel, Group as PanelGroup, Separator as ResizeHandle } from "react-resizable-panels";
+import { Plus, Pause, Play, Square, Upload, Copy, X, Loader2, Download, RotateCcw } from "lucide-react";
 
 type Status = "idle" | "recording" | "paused" | "transcribing" | "summarizing" | "coaching";
 type TranscriptView = "raw" | "cleaned";
@@ -23,20 +31,49 @@ const defaultContext: MeetingContext = {
   purpose: "",
 };
 
+function TranscriptLines({ text }: { text: string }) {
+  return (
+    <div className="space-y-1">
+      {text.split("\n").map((line, i) => {
+        const match = line.match(/^(\d+:\d+:\d+)\s+(.*)/);
+        if (match) {
+          return (
+            <div key={i} className="flex gap-4">
+              <span className="text-xs text-muted-foreground font-mono tabular-nums shrink-0 pt-0.5">{match[1]}</span>
+              <span className="text-sm">{match[2]}</span>
+            </div>
+          );
+        }
+        return <div key={i} className="text-sm">{line}</div>;
+      })}
+    </div>
+  );
+}
+
 export default function Home() {
   const [status, setStatus] = useState<Status>("idle");
   const [timer, setTimer] = useState(0);
   const [transcript, setTranscript] = useState("");
+  const [audioDuration, setAudioDuration] = useState(0);
+  const [transcribeProgress, setTranscribeProgress] = useState(0);
   const [cleanedTranscript, setCleanedTranscript] = useState("");
   const [transcriptView, setTranscriptView] = useState<TranscriptView>("raw");
   const [summary, setSummary] = useState("");
   const [coach, setCoach] = useState("");
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [context, setContext] = useState<MeetingContext>(defaultContext);
+  const [playbookContent, setPlaybookContent] = useState("");
+  const [playbookFilename, setPlaybookFilename] = useState("");
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const liveTranscriptRef = useRef<NodeJS.Timeout | null>(null);
+  const lastTranscribedIndex = useRef(0);
+  const isTranscribingChunk = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const transcriptContainerRef = useRef<HTMLDivElement | null>(null);
+  const userScrolledUp = useRef(false);
 
   const formatTime = (sec: number) => {
     const h = String(Math.floor(sec / 3600)).padStart(2, "0");
@@ -58,6 +95,42 @@ export default function Home() {
     }
   }, []);
 
+  const transcribeChunk = useCallback(async () => {
+    if (isTranscribingChunk.current) return;
+    const chunks = chunksRef.current;
+    if (chunks.length <= lastTranscribedIndex.current) return;
+
+    isTranscribingChunk.current = true;
+    try {
+      const blob = new Blob(chunks.slice(0), { type: "audio/webm" });
+      const formData = new FormData();
+      formData.append("audio", blob, "chunk.webm");
+
+      const res = await fetch("/api/transcribe", { method: "POST", body: formData });
+      const data = await res.json();
+      if (data.text) {
+        setTranscript(data.text);
+      }
+      lastTranscribedIndex.current = chunks.length;
+    } catch {
+      // ignore chunk errors
+    }
+    isTranscribingChunk.current = false;
+  }, []);
+
+  const startLiveTranscription = useCallback(() => {
+    liveTranscriptRef.current = setInterval(() => {
+      transcribeChunk();
+    }, 10000); // every 10 seconds
+  }, [transcribeChunk]);
+
+  const stopLiveTranscription = useCallback(() => {
+    if (liveTranscriptRef.current) {
+      clearInterval(liveTranscriptRef.current);
+      liveTranscriptRef.current = null;
+    }
+  }, []);
+
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -65,11 +138,10 @@ export default function Home() {
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
       chunksRef.current = [];
-
+      lastTranscribedIndex.current = 0;
       mediaRecorder.ondataavailable = (e) => {
         if (e.data.size > 0) chunksRef.current.push(e.data);
       };
-
       mediaRecorder.start(1000);
       setStatus("recording");
       setTimer(0);
@@ -78,6 +150,7 @@ export default function Home() {
       setSummary("");
       setCoach("");
       startTimer();
+      startLiveTranscription();
     } catch {
       alert("無法取得麥克風權限");
     }
@@ -101,7 +174,7 @@ export default function Home() {
 
   const stopRecording = async () => {
     if (!mediaRecorderRef.current) return;
-
+    stopLiveTranscription();
     return new Promise<Blob>((resolve) => {
       mediaRecorderRef.current!.onstop = () => {
         const blob = new Blob(chunksRef.current, { type: "audio/webm" });
@@ -113,32 +186,128 @@ export default function Home() {
     });
   };
 
+  const handleStopTranscribe = () => {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    setStatus("idle");
+  };
+
+  const handleClearTranscript = () => {
+    setTranscript("");
+    setCleanedTranscript("");
+    setSummary("");
+    setCoach("");
+    setAudioUrl(null);
+    setAudioDuration(0);
+    setTranscribeProgress(0);
+  };
+
+  const handleResetAll = () => {
+    setTranscript("");
+    setCleanedTranscript("");
+    setSummary("");
+    setCoach("");
+    setAudioUrl(null);
+    setAudioDuration(0);
+    setTranscribeProgress(0);
+    setContext(defaultContext);
+    setPlaybookContent("");
+    setPlaybookFilename("");
+  };
+
+  const streamTranscribe = async (blob: Blob, filename: string) => {
+    setStatus("transcribing");
+    setTranscript("");
+    setAudioDuration(0);
+    setTranscribeProgress(0);
+    userScrolledUp.current = false;
+
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+
+    const formData = new FormData();
+    formData.append("audio", blob, filename);
+
+    try {
+      const res = await fetch("/api/transcribe-stream", { method: "POST", body: formData, signal: abortController.signal });
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error("No reader");
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+      const lines: string[] = [];
+      let totalDuration = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() || "";
+
+        for (const part of parts) {
+          const dataLine = part.replace(/^data: /, "").trim();
+          if (!dataLine) continue;
+          try {
+            const msg = JSON.parse(dataLine);
+            if (msg.type === "info") {
+              totalDuration = msg.duration;
+              setAudioDuration(msg.duration);
+            } else if (msg.type === "line") {
+              lines.push(msg.text);
+              setTranscript(lines.join("\n"));
+              const timeMatch = msg.text.match(/^(\d+):(\d+):(\d+)/);
+              if (timeMatch && totalDuration > 0) {
+                const secs = parseInt(timeMatch[1]) * 3600 + parseInt(timeMatch[2]) * 60 + parseInt(timeMatch[3]);
+                setTranscribeProgress(Math.min(Math.round((secs / totalDuration) * 100), 99));
+              }
+            } else if (msg.type === "done") {
+              setTranscribeProgress(100);
+            } else if (msg.type === "error") {
+              setTranscript("轉錄失敗: " + msg.message);
+            }
+          } catch {
+            // ignore parse errors
+          }
+        }
+      }
+    } catch (err) {
+      // Don't overwrite transcript if aborted with existing content
+      if (err instanceof DOMException && err.name === "AbortError") {
+        // user stopped, keep whatever transcript we have
+      } else {
+        setTranscript((prev) => prev || "轉錄失敗: " + String(err));
+      }
+    }
+    abortControllerRef.current = null;
+    setAudioDuration(0);
+    setStatus("idle");
+  };
+
   const handleStop = async () => {
     const blob = await stopRecording();
     if (!blob) return;
 
-    const url = URL.createObjectURL(blob);
-    setAudioUrl(url);
-
-    setStatus("transcribing");
+    // Convert webm to wav via server for correct duration in audio player
     const formData = new FormData();
     formData.append("audio", blob, "recording.webm");
-
     try {
-      const res = await fetch("/api/transcribe", {
-        method: "POST",
-        body: formData,
-      });
-      const data = await res.json();
-      if (data.text) {
-        setTranscript(data.text);
+      const res = await fetch("/api/convert-wav", { method: "POST", body: formData });
+      if (res.ok) {
+        const wavBlob = await res.blob();
+        setAudioUrl(URL.createObjectURL(wavBlob));
       } else {
-        setTranscript("轉錄失敗: " + (data.error || "未知錯誤"));
+        setAudioUrl(URL.createObjectURL(blob));
       }
-    } catch (err) {
-      setTranscript("轉錄失敗: " + String(err));
+    } catch {
+      setAudioUrl(URL.createObjectURL(blob));
     }
-    setStatus("idle");
+
+    setCleanedTranscript("");
+    setSummary("");
+    setCoach("");
+    await streamTranscribe(blob, "recording.webm");
   };
 
   const handleFileSelect = async () => {
@@ -148,121 +317,68 @@ export default function Home() {
     input.onchange = async (e) => {
       const file = (e.target as HTMLInputElement).files?.[0];
       if (!file) return;
-
-      setStatus("transcribing");
-      setTranscript("");
       setCleanedTranscript("");
       setSummary("");
       setCoach("");
-      const formData = new FormData();
-      formData.append("audio", file);
-
-      try {
-        const res = await fetch("/api/transcribe", {
-          method: "POST",
-          body: formData,
-        });
-        const data = await res.json();
-        if (data.text) {
-          setTranscript(data.text);
-        } else {
-          setTranscript("轉錄失敗: " + (data.error || "未知錯誤"));
-        }
-      } catch (err) {
-        setTranscript("轉錄失敗: " + String(err));
-      }
-      setStatus("idle");
+      await streamTranscribe(file, file.name);
     };
     input.click();
   };
 
-  const handleClean = async () => {
-    if (!transcript) return;
-    setStatus("coaching");
-
+  const callClaude = async (mode: string) => {
+    const statusMap: Record<string, Status> = { clean: "coaching", summarize: "summarizing", coach: "coaching" };
+    setStatus(statusMap[mode] || "summarizing");
     try {
       const res = await fetch("/api/summarize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: transcript,
-          mode: "clean",
-        }),
+        body: JSON.stringify({ text: transcript, context, mode }),
       });
       const data = await res.json();
-      setCleanedTranscript(data.summary || "清理失敗");
-      setTranscriptView("cleaned");
+      const result = data.summary || "失敗";
+      if (mode === "clean") { setCleanedTranscript(result); setTranscriptView("cleaned"); }
+      else if (mode === "coach") { setCoach(result); }
+      else { setSummary(result); }
     } catch (err) {
-      setCleanedTranscript("清理失敗: " + String(err));
-    }
-    setStatus("idle");
-  };
-
-  const handleSummarize = async () => {
-    if (!transcript) return;
-    setStatus("summarizing");
-
-    try {
-      const res = await fetch("/api/summarize", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: transcript,
-          context,
-          mode: "summarize",
-        }),
-      });
-      const data = await res.json();
-      setSummary(data.summary || "摘要失敗");
-    } catch (err) {
-      setSummary("摘要失敗: " + String(err));
-    }
-    setStatus("idle");
-  };
-
-  const handleDeepCoach = async () => {
-    if (!transcript) return;
-    setStatus("coaching");
-
-    try {
-      const res = await fetch("/api/summarize", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: transcript,
-          context,
-          mode: "coach",
-        }),
-      });
-      const data = await res.json();
-      setCoach(data.summary || "分析失敗");
-    } catch (err) {
-      setCoach("分析失敗: " + String(err));
+      const msg = "失敗: " + String(err);
+      if (mode === "clean") setCleanedTranscript(msg);
+      else if (mode === "coach") setCoach(msg);
+      else setSummary(msg);
     }
     setStatus("idle");
   };
 
   const handleSave = () => {
-    const content = [
-      `# ${context.title || "Meeting Notes"}`,
-      `日期: ${context.date}`,
-      `時間: ${context.time}`,
-      `地點: ${context.location}`,
-      `與會者: ${context.attendees}`,
-      `目的: ${context.purpose}`,
-      "",
-      "---",
-      "",
-      "## Transcript",
-      cleanedTranscript || transcript,
-      "",
-      "## Summary",
-      summary,
-      "",
-      "## Deep Coach",
-      coach,
-    ].join("\n");
+    const datetime = context.date && context.time
+      ? `${context.date} ${context.time}`
+      : context.date || "";
 
+    const sections = [
+      `# ${context.title || "Meeting Notes"}`,
+      "",
+      "## 基本資訊",
+      "",
+      `- 日期時間: ${datetime}`,
+      `- 地點: ${context.location}`,
+      `- 與會者: ${context.attendees}`,
+      `- 目的: ${context.purpose}`,
+    ];
+
+    if (playbookContent) {
+      sections.push("", "## Playbook", "", playbookContent);
+    }
+
+    if (summary) {
+      sections.push("", "---", "", "## Summary", "", summary);
+    }
+
+    if (coach) {
+      sections.push("", "---", "", "## Deep Coach", "", coach);
+    }
+
+    sections.push("", "---", "", "## Transcript", "", cleanedTranscript || transcript);
+
+    const content = sections.join("\n");
     const blob = new Blob([content], { type: "text/markdown" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -272,330 +388,327 @@ export default function Home() {
     URL.revokeObjectURL(url);
   };
 
-  const handleCopy = (text: string) => {
-    navigator.clipboard.writeText(text);
+  const handleCopy = (text: string) => navigator.clipboard.writeText(text);
+
+  const parsePlaybook = (text: string) => {
+    const get = (key: string) => {
+      const regex = new RegExp(`^-\\s*${key}:\\s*(.+)$`, "m");
+      const match = text.match(regex);
+      return match ? match[1].trim() : "";
+    };
+
+    const title = text.match(/^#\s+(.+)$/m)?.[1]?.trim() || "";
+    const date = get("日期");
+    const time = get("時間");
+    const location = get("地點");
+    const attendees = get("與會者");
+    const purpose = get("目的");
+
+    return { title, date, time, location, attendees, purpose };
+  };
+
+  const handleImportPlaybook = () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".md,.markdown,.txt";
+    input.onchange = async (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+      const text = await file.text();
+      setPlaybookContent(text);
+      setPlaybookFilename(file.name);
+
+      const parsed = parsePlaybook(text);
+      setContext((prev) => ({
+        title: parsed.title || prev.title,
+        date: parsed.date || prev.date,
+        time: parsed.time || prev.time,
+        location: parsed.location || prev.location,
+        attendees: parsed.attendees || prev.attendees,
+        purpose: parsed.purpose || prev.purpose,
+      }));
+    };
+    input.click();
   };
 
   const updateContext = (field: keyof MeetingContext, value: string) => {
     setContext((prev) => ({ ...prev, [field]: value }));
   };
 
+  useEffect(() => { return () => { stopTimer(); stopLiveTranscription(); }; }, [stopTimer, stopLiveTranscription]);
+
+  // Auto-scroll transcript to bottom when new text arrives
   useEffect(() => {
-    return () => stopTimer();
-  }, [stopTimer]);
+    const el = transcriptContainerRef.current;
+    if (!el || userScrolledUp.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [transcript]);
+
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
 
   const isRecordingOrPaused = status === "recording" || status === "paused";
   const isBusy = status !== "idle" && !isRecordingOrPaused;
 
+  if (!mounted) {
+    return <div className="h-screen flex items-center justify-center bg-background text-muted-foreground">Loading...</div>;
+  }
+
   return (
-    <div className="h-screen flex flex-col">
+    <div className="h-screen flex flex-col bg-background text-foreground">
       {/* Header */}
-      <header className="flex items-center justify-between px-6 py-3 border-b border-gray-200 shrink-0">
-        <h1 className="text-lg font-semibold text-gray-900">Meeting Transcriber</h1>
-        <div className="flex items-center gap-4">
-          <span className="font-mono text-2xl text-gray-900">{formatTime(timer)}</span>
-          {isRecordingOrPaused && (
-            <span
-              className={`px-3 py-1 rounded-full text-xs font-medium ${
-                status === "recording"
-                  ? "bg-red-500/20 text-red-400 animate-pulse"
-                  : "bg-yellow-500/20 text-yellow-400"
-              }`}
-            >
-              {status === "recording" ? "REC" : "PAUSED"}
-            </span>
-          )}
-          {status === "transcribing" && (
-            <span className="px-3 py-1 rounded-full text-xs font-medium bg-blue-500/20 text-blue-400 animate-pulse">
-              轉錄中...
-            </span>
-          )}
-          {status === "summarizing" && (
-            <span className="px-3 py-1 rounded-full text-xs font-medium bg-purple-500/20 text-purple-400 animate-pulse">
-              摘要中...
-            </span>
-          )}
-          {status === "coaching" && (
-            <span className="px-3 py-1 rounded-full text-xs font-medium bg-amber-500/20 text-amber-400 animate-pulse">
-              AI 分析中...
-            </span>
-          )}
+      <header className="flex items-center justify-between px-3 py-2 border-b shrink-0">
+        <h1 className="text-lg font-semibold">Meeting Transcriber</h1>
+        <div className="flex items-center gap-1">
+          <Button onClick={handleResetAll} disabled={isBusy} size="icon" variant="ghost" className="h-7 w-7" title="重置所有資料">
+            <RotateCcw className="h-4 w-4" />
+          </Button>
+          <Button onClick={handleSave} disabled={!transcript && !summary} size="icon" variant="ghost" className="h-7 w-7" title="儲存會議記錄">
+            <Download className="h-4 w-4" />
+          </Button>
         </div>
       </header>
 
-      {/* Main content - three columns */}
-      <main className="flex-1 flex overflow-hidden min-h-0">
-        {/* Left: Context / Playbook */}
-        <div className="w-[320px] flex flex-col border-r border-gray-200 shrink-0">
-          <div className="flex items-center justify-between px-4 py-2 border-b border-gray-200">
-            <span className="text-sm font-medium text-gray-500">CONTEXT / PLAYBOOK</span>
-          </div>
-          <div className="flex-1 overflow-y-auto p-4 space-y-3">
-            <div>
-              <input
-                type="text"
+      {/* Main content - three columns with resizable panels */}
+      <main className="flex-1 overflow-hidden min-h-0">
+        <PanelGroup direction="horizontal" className="h-full">
+
+        {/* Left: Context (top) + Transcript (bottom), split vertically */}
+        <Panel defaultSize={50} minSize={20}>
+        <div className="h-full flex flex-col">
+          {/* Top: Context / Playbook */}
+          <div className="h-1/2 flex flex-col border-b overflow-hidden resize-y" style={{ minHeight: 120 }}>
+            <div className="flex items-center justify-between px-4 py-2 border-b shrink-0">
+              <span className="text-sm font-medium text-muted-foreground">CONTEXT / PLAYBOOK</span>
+              <Button variant="ghost" size="icon" className="h-5 w-5" onClick={handleImportPlaybook} title="匯入 Playbook (.md)">
+                <Plus className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+            <div className="flex-1 overflow-y-auto hide-scrollbar p-3 space-y-4">
+              <Input
                 placeholder="會議標題"
                 value={context.title}
                 onChange={(e) => updateContext("title", e.target.value)}
-                className="w-full bg-transparent border-b border-gray-300 text-gray-900 text-lg font-medium pb-2 focus:outline-none focus:border-blue-500 placeholder-gray-400"
+                className="text-lg font-medium border-0 border-b rounded-none shadow-none px-0 focus-visible:ring-0"
               />
-            </div>
+              <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                會議劇本 (Meeting Playbook)
+              </h3>
+              <div className="grid grid-cols-[60px_1fr] gap-2 text-sm">
+                <span className="text-muted-foreground py-1">日期時間</span>
+                <Input type="datetime-local" value={context.date && context.time ? `${context.date}T${context.time.split("-")[0]?.trim() || "00:00"}` : context.date ? `${context.date}T00:00` : ""} onChange={(e) => { const v = e.target.value; if (v) { updateContext("date", v.split("T")[0]); updateContext("time", v.split("T")[1]?.slice(0, 5) || ""); } }} className="h-8 py-0 px-2" />
+                <span className="text-muted-foreground py-1">地點</span>
+                <Input placeholder="例: Google Meet URL" value={context.location} onChange={(e) => updateContext("location", e.target.value)} className="h-8" />
+                <span className="text-muted-foreground py-1">與會者</span>
+                <Textarea placeholder="參與人員" value={context.attendees} onChange={(e) => updateContext("attendees", e.target.value)} rows={2} className="resize-none min-h-0" />
+                <span className="text-muted-foreground py-1">目的</span>
+                <Textarea placeholder="會議目的" value={context.purpose} onChange={(e) => updateContext("purpose", e.target.value)} rows={2} className="resize-none min-h-0" />
+              </div>
 
-            <div className="bg-gray-50 rounded-lg p-3 space-y-2 border border-gray-200">
-              <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider">會議劇本 (Meeting Playbook)</h3>
-              <table className="w-full text-sm">
-                <tbody>
-                  <tr className="border-b border-gray-200">
-                    <td className="py-2 pr-3 text-gray-500 whitespace-nowrap align-top">項目</td>
-                    <td className="py-2 text-gray-400">內容</td>
-                  </tr>
-                  <tr className="border-b border-gray-200">
-                    <td className="py-2 pr-3 text-gray-500 whitespace-nowrap">日期</td>
-                    <td className="py-2">
-                      <input
-                        type="date"
-                        value={context.date}
-                        onChange={(e) => updateContext("date", e.target.value)}
-                        className="w-full bg-transparent text-gray-700 focus:outline-none"
-                      />
-                    </td>
-                  </tr>
-                  <tr className="border-b border-gray-200">
-                    <td className="py-2 pr-3 text-gray-500 whitespace-nowrap">時間</td>
-                    <td className="py-2">
-                      <input
-                        type="text"
-                        placeholder="例: 14:00-15:00"
-                        value={context.time}
-                        onChange={(e) => updateContext("time", e.target.value)}
-                        className="w-full bg-transparent text-gray-700 focus:outline-none placeholder-gray-400"
-                      />
-                    </td>
-                  </tr>
-                  <tr className="border-b border-gray-200">
-                    <td className="py-2 pr-3 text-gray-500 whitespace-nowrap">地點</td>
-                    <td className="py-2">
-                      <input
-                        type="text"
-                        placeholder="例: Google Meet URL"
-                        value={context.location}
-                        onChange={(e) => updateContext("location", e.target.value)}
-                        className="w-full bg-transparent text-gray-700 focus:outline-none placeholder-gray-400"
-                      />
-                    </td>
-                  </tr>
-                  <tr className="border-b border-gray-200">
-                    <td className="py-2 pr-3 text-gray-500 whitespace-nowrap align-top">與會者</td>
-                    <td className="py-2">
-                      <textarea
-                        placeholder="參與人員"
-                        value={context.attendees}
-                        onChange={(e) => updateContext("attendees", e.target.value)}
-                        rows={2}
-                        className="w-full bg-transparent text-gray-700 focus:outline-none placeholder-gray-400 resize-none"
-                      />
-                    </td>
-                  </tr>
-                  <tr>
-                    <td className="py-2 pr-3 text-gray-500 whitespace-nowrap align-top">目的</td>
-                    <td className="py-2">
-                      <textarea
-                        placeholder="會議目的"
-                        value={context.purpose}
-                        onChange={(e) => updateContext("purpose", e.target.value)}
-                        rows={3}
-                        className="w-full bg-transparent text-gray-700 focus:outline-none placeholder-gray-400 resize-none"
-                      />
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-
-            {/* Summary section in left column */}
-            {summary && (
-              <div className="mt-4">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider">SUMMARY</h3>
-                  <button onClick={() => handleCopy(summary)} className="text-xs text-gray-400 hover:text-gray-900">複製</button>
+              {playbookContent && (
+                <div className="mt-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{playbookFilename}</span>
+                    <Button variant="ghost" size="sm" className="h-5 text-xs text-muted-foreground" onClick={() => { setPlaybookContent(""); setPlaybookFilename(""); }}>
+                      移除
+                    </Button>
+                  </div>
+                  <pre className="text-sm leading-relaxed whitespace-pre-wrap font-sans text-foreground bg-muted/50 rounded-md p-3">{playbookContent}</pre>
                 </div>
-                <pre className="text-sm leading-relaxed whitespace-pre-wrap text-gray-700 font-sans bg-gray-50 rounded-lg p-3 border border-gray-200">
-                  {summary}
-                </pre>
-              </div>
-            )}
+              )}
+            </div>
           </div>
-        </div>
 
-        {/* Center: Transcript */}
-        <div className="flex-1 flex flex-col border-r border-gray-200 min-w-0">
-          <div className="flex items-center justify-between px-4 py-2 border-b border-gray-200">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-gray-500">TRANSCRIPT</span>
-              <div className="flex bg-gray-100 rounded-md overflow-hidden ml-3">
-                <button
-                  onClick={() => setTranscriptView("raw")}
-                  className={`px-3 py-1 text-xs font-medium transition-colors ${
-                    transcriptView === "raw"
-                      ? "bg-blue-600 text-white"
-                      : "text-gray-400 hover:text-gray-700"
-                  }`}
-                >
-                  RAW
-                </button>
-                <button
-                  onClick={() => setTranscriptView("cleaned")}
-                  className={`px-3 py-1 text-xs font-medium transition-colors ${
-                    transcriptView === "cleaned"
-                      ? "bg-blue-600 text-white"
-                      : "text-gray-400 hover:text-gray-700"
-                  }`}
-                >
-                  CLEANED
-                </button>
+          {/* Bottom: Transcript */}
+          <div className="flex-1 flex flex-col overflow-hidden min-h-0">
+            <div className="flex items-center justify-between px-4 py-2 border-b shrink-0">
+              <span className="text-sm font-medium text-muted-foreground">TRANSCRIPT</span>
+              <div className="flex items-center gap-2">
+                {/* Idle + no transcript: show play + upload */}
+                {!isRecordingOrPaused && !transcript && status === "idle" && (
+                  <>
+                    <Button onClick={startRecording} size="icon" variant="ghost" className="h-5 w-5" title="開始錄音">
+                      <Play className="h-3 w-3" />
+                    </Button>
+                    <Button onClick={handleFileSelect} size="icon" variant="ghost" className="h-5 w-5" title="上傳音檔">
+                      <Upload className="h-3 w-3" />
+                    </Button>
+                  </>
+                )}
+                {/* Transcribing: show progress bar + stop */}
+                {status === "transcribing" && (
+                  <>
+                    <div className="w-20 h-1.5 bg-muted rounded-full overflow-hidden">
+                      <div className="h-full bg-blue-500 rounded-full transition-all duration-500 ease-out" style={{ width: `${transcribeProgress}%` }} />
+                    </div>
+                    <span className="text-xs text-muted-foreground font-mono tabular-nums">{transcribeProgress}%</span>
+                    <Button onClick={handleStopTranscribe} size="icon" variant="destructive" className="h-5 w-5 rounded-full" title="停止轉錄">
+                      <Square className="h-2 w-2" />
+                    </Button>
+                  </>
+                )}
+                {/* Recording/Paused: show status + controls */}
+                {isRecordingOrPaused && (
+                  <>
+                    <div className={`w-2 h-2 rounded-full ${status === "recording" ? "bg-red-500 animate-pulse" : "bg-yellow-500"}`} />
+                    <span className="text-xs text-muted-foreground font-mono tabular-nums">{formatTime(timer)}</span>
+                    {status === "recording" ? (
+                      <Button onClick={pauseRecording} size="icon" variant="secondary" className="h-5 w-5 rounded-full" title="暫停">
+                        <Pause className="h-2.5 w-2.5" />
+                      </Button>
+                    ) : (
+                      <Button onClick={resumeRecording} size="icon" className="h-5 w-5 rounded-full bg-green-600 hover:bg-green-500 text-white" title="繼續">
+                        <Play className="h-2.5 w-2.5" />
+                      </Button>
+                    )}
+                    <Button onClick={handleStop} size="icon" variant="destructive" className="h-5 w-5 rounded-full" title="停止">
+                      <Square className="h-2 w-2" />
+                    </Button>
+                  </>
+                )}
+                {/* Has transcript + idle: show copy + clear */}
+                {transcript && status === "idle" && (
+                  <>
+                    <Button variant="ghost" size="icon" className="h-5 w-5" onClick={() => handleCopy(transcript)} title="複製">
+                      <Copy className="h-3 w-3" />
+                    </Button>
+                    <Button variant="ghost" size="icon" className="h-5 w-5" onClick={handleClearTranscript} title="清除">
+                      <X className="h-3 w-3" />
+                    </Button>
+                  </>
+                )}
               </div>
             </div>
-            {transcript && (
-              <button
-                onClick={() => handleCopy(transcriptView === "raw" ? transcript : cleanedTranscript)}
-                className="text-xs text-gray-400 hover:text-gray-700 transition-colors"
-              >
-                複製
-              </button>
-            )}
-          </div>
-          <div className="flex-1 overflow-y-auto p-4">
-            {transcriptView === "raw" ? (
-              transcript ? (
-                <pre className="text-sm leading-relaxed whitespace-pre-wrap text-gray-700 font-sans">
-                  {transcript}
-                </pre>
+            <div
+              ref={transcriptContainerRef}
+              className="flex-1 overflow-y-auto p-3 flex flex-col min-h-0"
+              onWheel={(e) => {
+                if (e.deltaY < 0) userScrolledUp.current = true;
+              }}
+              onScroll={(e) => {
+                const el = e.currentTarget;
+                if (el.scrollHeight - el.scrollTop - el.clientHeight < 10) {
+                  userScrolledUp.current = false;
+                }
+              }}
+            >
+              {isRecordingOrPaused ? (
+                <>
+                  {transcript ? (
+                    <TranscriptLines text={transcript} />
+                  ) : (
+                    <div className="flex items-center justify-center h-full text-muted-foreground">
+                      <p className="text-sm">即時轉錄中，每 10 秒更新...</p>
+                    </div>
+                  )}
+                </>
+              ) : transcript ? (
+                <TranscriptLines text={transcript} />
+              ) : status === "transcribing" ? (
+                <>
+                  {transcript ? (
+                    <TranscriptLines text={transcript} />
+                  ) : (
+                    <div className="flex items-center justify-center h-full">
+                      <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                    </div>
+                  )}
+                </>
               ) : (
-                <div className="flex items-center justify-center h-full text-gray-600">
-                  <p>點擊「Start」開始錄音，或選擇音檔</p>
+                <div className="flex items-center justify-center h-full text-muted-foreground">
+                  <p className="text-sm">點擊上方按鈕開始錄音或上傳音檔</p>
                 </div>
-              )
-            ) : cleanedTranscript ? (
-              <pre className="text-sm leading-relaxed whitespace-pre-wrap text-gray-700 font-sans">
-                {cleanedTranscript}
-              </pre>
-            ) : (
-              <div className="flex items-center justify-center h-full text-gray-600">
-                <p>點擊「Clean」清理逐字稿</p>
-              </div>
-            )}
+              )}
+            </div>
           </div>
         </div>
+        </Panel>
 
-        {/* Right: Deep Coach */}
-        <div className="w-[350px] flex flex-col shrink-0">
-          <div className="flex items-center justify-between px-4 py-2 border-b border-gray-200">
-            <span className="text-sm font-medium text-gray-500">DEEP COACH</span>
-            {coach && (
-              <button
-                onClick={() => handleCopy(coach)}
-                className="text-xs text-gray-400 hover:text-gray-700 transition-colors"
-              >
-                複製
-              </button>
-            )}
-          </div>
-          <div className="flex-1 overflow-y-auto p-4">
-            {coach ? (
-              <pre className="text-sm leading-relaxed whitespace-pre-wrap text-gray-700 font-sans">
-                {coach}
-              </pre>
-            ) : (
-              <div className="flex items-center justify-center h-full text-gray-600 text-center px-4">
-                <p>點擊「Deep Coach」根據會議內容取得 AI 建議</p>
+        <ResizeHandle className="w-1.5 bg-border hover:bg-primary/20 transition-colors" />
+
+        {/* Right: Meeting Summary (top) + Deep Coach (bottom) */}
+        <Panel defaultSize={50} minSize={20}>
+        <div className="h-full flex flex-col">
+          {/* Top: Meeting Summary */}
+          <div className="h-1/2 flex flex-col border-b overflow-hidden resize-y" style={{ minHeight: 120 }}>
+            <div className="flex items-center justify-between px-4 py-2 border-b shrink-0">
+              <span className="text-sm font-medium text-muted-foreground">MEETING SUMMARY</span>
+              <div className="flex items-center gap-1">
+                {!summary && status !== "summarizing" && (
+                  <Button onClick={() => callClaude("summarize")} size="icon" variant="ghost" className="h-5 w-5" disabled={!transcript || isBusy} title="產生摘要">
+                    <Play className="h-3 w-3" />
+                  </Button>
+                )}
+                {status === "summarizing" && (
+                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                )}
+                {summary && status !== "summarizing" && (
+                  <Button variant="ghost" size="icon" className="h-5 w-5" onClick={() => handleCopy(summary)} title="複製">
+                    <Copy className="h-3 w-3" />
+                  </Button>
+                )}
               </div>
-            )}
+            </div>
+            <div className="flex-1 overflow-y-auto p-3">
+              {status === "summarizing" ? (
+                <div className="flex items-center justify-center h-full">
+                  <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                </div>
+              ) : summary ? (
+                <pre className="text-sm leading-relaxed whitespace-pre-wrap font-sans">{summary}</pre>
+              ) : (
+                <div className="flex items-center justify-center h-full text-muted-foreground">
+                  <p className="text-sm">{transcript ? "點擊上方按鈕開始產生摘要" : "點擊上方按鈕開始產生摘要"}</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Bottom: Deep Coach */}
+          <div className="flex-1 flex flex-col overflow-hidden min-h-0">
+            <div className="flex items-center justify-between px-4 py-2 border-b shrink-0">
+              <span className="text-sm font-medium text-muted-foreground">DEEP COACH</span>
+              <div className="flex items-center gap-1">
+                {!coach && status !== "coaching" && (
+                  <Button onClick={() => callClaude("coach")} size="icon" variant="ghost" className="h-5 w-5" disabled={!transcript || isBusy} title="取得 AI 建議">
+                    <Play className="h-3 w-3" />
+                  </Button>
+                )}
+                {status === "coaching" && (
+                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                )}
+                {coach && status !== "coaching" && (
+                  <Button variant="ghost" size="icon" className="h-5 w-5" onClick={() => handleCopy(coach)} title="複製">
+                    <Copy className="h-3 w-3" />
+                  </Button>
+                )}
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-3">
+              {status === "coaching" ? (
+                <div className="flex items-center justify-center h-full">
+                  <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                </div>
+              ) : coach ? (
+                <pre className="text-sm leading-relaxed whitespace-pre-wrap font-sans">{coach}</pre>
+              ) : (
+                <div className="flex items-center justify-center h-full text-muted-foreground text-center px-4">
+                  <p className="text-sm">{transcript ? "點擊上方按鈕開始取得 AI 建議" : "點擊上方按鈕開始取得 AI 建議"}</p>
+                </div>
+              )}
+            </div>
           </div>
         </div>
+        </Panel>
+        </PanelGroup>
       </main>
 
-      {/* Bottom controls */}
-      <footer className="flex items-center gap-3 px-6 py-3 border-t border-gray-200 bg-gray-50 shrink-0">
-        {!isRecordingOrPaused ? (
-          <button
-            onClick={startRecording}
-            disabled={isBusy}
-            className="px-5 py-2 rounded-lg bg-green-600 hover:bg-green-500 text-white text-sm font-medium disabled:opacity-40 transition-colors"
-          >
-            Start
-          </button>
-        ) : (
-          <>
-            {status === "recording" ? (
-              <button
-                onClick={pauseRecording}
-                className="px-5 py-2 rounded-lg bg-yellow-600 hover:bg-yellow-500 text-white text-sm font-medium transition-colors"
-              >
-                Resume
-              </button>
-            ) : (
-              <button
-                onClick={resumeRecording}
-                className="px-5 py-2 rounded-lg bg-green-600 hover:bg-green-500 text-white text-sm font-medium transition-colors"
-              >
-                Resume
-              </button>
-            )}
-            <button
-              onClick={handleStop}
-              className="px-5 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-medium transition-colors"
-            >
-              End
-            </button>
-          </>
-        )}
-
-        <button
-          onClick={handleFileSelect}
-          disabled={isBusy}
-          className="px-5 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium disabled:opacity-40 transition-colors"
-        >
-          選擇音檔
-        </button>
-
-        <div className="w-px h-6 bg-gray-300" />
-
-        <button
-          onClick={handleDeepCoach}
-          disabled={!transcript || isBusy}
-          className="px-5 py-2 rounded-lg bg-amber-700 hover:bg-amber-600 text-white text-sm font-medium disabled:opacity-40 transition-colors"
-        >
-          Deep Coach
-        </button>
-
-        <button
-          onClick={handleClean}
-          disabled={!transcript || isBusy}
-          className="px-5 py-2 rounded-lg bg-teal-700 hover:bg-teal-600 text-white text-sm font-medium disabled:opacity-40 transition-colors"
-        >
-          Clean
-        </button>
-
-        <button
-          onClick={handleSummarize}
-          disabled={!transcript || isBusy}
-          className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium disabled:opacity-40 transition-colors"
-        >
-          Summarize
-        </button>
-
-        <button
-          onClick={handleSave}
-          disabled={!transcript && !summary}
-          className="px-5 py-2 rounded-lg bg-gray-700 hover:bg-gray-600 text-white text-sm font-medium disabled:opacity-40 transition-colors"
-        >
-          Save
-        </button>
-
-        {audioUrl && (
-          <audio controls src={audioUrl} className="h-8 ml-auto" />
-        )}
-      </footer>
+      {/* Bottom: audio player */}
+      {audioUrl && (
+        <footer className="flex items-center px-6 py-2 border-t bg-muted/50 shrink-0">
+          <audio controls src={audioUrl} className="h-8 w-full" />
+        </footer>
+      )}
     </div>
   );
 }
