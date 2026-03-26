@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
-import { Noto_Sans, Noto_Sans_TC } from "next/font/google";
+import { Nunito, Noto_Sans_TC } from "next/font/google";
 import "./globals.css";
 
-const notoSans = Noto_Sans({
+const nunito = Nunito({
   subsets: ["latin"],
   weight: ["400", "500", "600", "700"],
   variable: "--font-sans",
@@ -32,7 +32,7 @@ export default function RootLayout({
   return (
     <html lang="zh-TW">
       <body
-        className={`${notoSans.variable} ${notoSansTC.variable} font-sans antialiased`}
+        className={`${nunito.variable} ${notoSansTC.variable} font-sans antialiased`}
       >
         {children}
       </body>
