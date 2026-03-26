@@ -31,6 +31,42 @@ const defaultContext: MeetingContext = {
   purpose: "",
 };
 
+// Local instant punctuation for raw Chinese transcript
+function localPolish(text: string): string {
+  if (!text) return text;
+  let result = text;
+
+  // Add comma after common transition words/phrases
+  result = result.replace(/(然後|所以|但是|不過|因為|如果|那|就是說|接下來|其實|基本上|簡單來說|總之|對|好|嗯|欸)(?=[^\s，。、！？\n])/g, "$1，");
+
+  // Add period before topic transitions (when followed by certain patterns)
+  result = result.replace(/(了|的|吧|嗎|呢|啊|哦|喔|啦|嘛|呀|吼|齁|對)(?=(然後|所以|但是|不過|因為|如果|那我|接下來|其實|再來|第一|第二|第三|首先|最後))/g, "$1。\n\n");
+
+  // Add period + line break at longer segments (~80 chars) at natural break points
+  const segments: string[] = [];
+  let current = "";
+  for (const char of result) {
+    current += char;
+    if (char === "\n") {
+      segments.push(current);
+      current = "";
+    } else if (current.length > 60 && /[，。！？]/.test(char)) {
+      segments.push(current + "\n");
+      current = "";
+    }
+  }
+  if (current) segments.push(current);
+  result = segments.join("");
+
+  // Clean up: remove duplicate punctuation
+  result = result.replace(/，+/g, "，");
+  result = result.replace(/。+/g, "。");
+  result = result.replace(/，。/g, "。");
+  result = result.replace(/\n{3,}/g, "\n\n");
+
+  return result;
+}
+
 function TranscriptLines({ text }: { text: string }) {
   return (
     <div className="space-y-1">
@@ -71,9 +107,14 @@ export default function Home() {
   const liveTranscriptRef = useRef<NodeJS.Timeout | null>(null);
   const lastTranscribedIndex = useRef(0);
   const isTranscribingChunk = useRef(false);
+  const isPolishing = useRef(false);
+  const polishTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const transcriptContainerRef = useRef<HTMLDivElement | null>(null);
   const userScrolledUp = useRef(false);
+  const [polishedTranscript, setPolishedTranscript] = useState("");
+  const [isPolishingState, setIsPolishingState] = useState(false);
+  const polishedRawLength = useRef(0); // how many chars of raw text have been polished
 
   const formatTime = (sec: number) => {
     const h = String(Math.floor(sec / 3600)).padStart(2, "0");
@@ -95,6 +136,51 @@ export default function Home() {
     }
   }, []);
 
+  const pendingPolishText = useRef<string | null>(null);
+
+  const polishTranscript = useCallback(async (text: string) => {
+    if (isPolishing.current) {
+      // Queue this text for when the current polish finishes
+      pendingPolishText.current = text;
+      return;
+    }
+    if (!text) return;
+    isPolishing.current = true;
+    setIsPolishingState(true);
+    try {
+      console.log("[polish] sending text length:", text.length);
+      const res = await fetch("/api/polish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      const data = await res.json();
+      console.log("[polish] response:", data.text ? "ok, length:" + data.text.length : "error:" + data.error);
+      if (data.text) {
+        setPolishedTranscript(data.text);
+        polishedRawLength.current = text.length;
+      }
+    } catch (err) {
+      console.error("[polish] fetch error:", err);
+    }
+    isPolishing.current = false;
+    setIsPolishingState(false);
+
+    // If new text came in while polishing, process it
+    if (pendingPolishText.current) {
+      const next = pendingPolishText.current;
+      pendingPolishText.current = null;
+      polishTranscript(next);
+    }
+  }, []);
+
+  const schedulePolish = useCallback((text: string) => {
+    if (polishTimeoutRef.current) clearTimeout(polishTimeoutRef.current);
+    polishTimeoutRef.current = setTimeout(() => {
+      polishTranscript(text);
+    }, 2000);
+  }, [polishTranscript]);
+
   const transcribeChunk = useCallback(async () => {
     if (isTranscribingChunk.current) return;
     const chunks = chunksRef.current;
@@ -106,17 +192,21 @@ export default function Home() {
       const formData = new FormData();
       formData.append("audio", blob, "chunk.webm");
 
+      console.log("[transcribe] sending chunk, size:", blob.size);
       const res = await fetch("/api/transcribe", { method: "POST", body: formData });
       const data = await res.json();
+      console.log("[transcribe] response:", data.text ? "text length:" + data.text.length : "error:" + data.error);
       if (data.text) {
         setTranscript(data.text);
+        console.log("[transcribe] scheduling polish");
+        schedulePolish(data.text);
       }
       lastTranscribedIndex.current = chunks.length;
     } catch {
       // ignore chunk errors
     }
     isTranscribingChunk.current = false;
-  }, []);
+  }, [schedulePolish]);
 
   const startLiveTranscription = useCallback(() => {
     liveTranscriptRef.current = setInterval(() => {
@@ -128,6 +218,10 @@ export default function Home() {
     if (liveTranscriptRef.current) {
       clearInterval(liveTranscriptRef.current);
       liveTranscriptRef.current = null;
+    }
+    if (polishTimeoutRef.current) {
+      clearTimeout(polishTimeoutRef.current);
+      polishTimeoutRef.current = null;
     }
   }, []);
 
@@ -146,6 +240,8 @@ export default function Home() {
       setStatus("recording");
       setTimer(0);
       setTranscript("");
+      setPolishedTranscript("");
+      polishedRawLength.current = 0;
       setCleanedTranscript("");
       setSummary("");
       setCoach("");
@@ -194,6 +290,7 @@ export default function Home() {
 
   const handleClearTranscript = () => {
     setTranscript("");
+    setPolishedTranscript("");
     setCleanedTranscript("");
     setSummary("");
     setCoach("");
@@ -204,6 +301,7 @@ export default function Home() {
 
   const handleResetAll = () => {
     setTranscript("");
+    setPolishedTranscript("");
     setCleanedTranscript("");
     setSummary("");
     setCoach("");
@@ -227,6 +325,7 @@ export default function Home() {
 
     const formData = new FormData();
     formData.append("audio", blob, filename);
+    const lines: string[] = [];
 
     try {
       const res = await fetch("/api/transcribe-stream", { method: "POST", body: formData, signal: abortController.signal });
@@ -235,7 +334,6 @@ export default function Home() {
 
       const decoder = new TextDecoder();
       let buffer = "";
-      const lines: string[] = [];
       let totalDuration = 0;
 
       while (true) {
@@ -260,6 +358,26 @@ export default function Home() {
               if (msg.secs !== undefined && totalDuration > 0) {
                 setTranscribeProgress(Math.min(Math.round((msg.secs / totalDuration) * 100), 99));
               }
+              // Polish every 5 lines during streaming
+              if (lines.length % 5 === 0 && !isPolishing.current) {
+                isPolishing.current = true;
+                setIsPolishingState(true);
+                const textToPolish = lines.join("");
+                const rawLen = textToPolish.length;
+                fetch("/api/polish", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ text: textToPolish }),
+                }).then(r => r.json()).then(d => {
+                  if (d.text) {
+                    setPolishedTranscript(d.text);
+                    polishedRawLength.current = rawLen;
+                  }
+                }).catch(() => {}).finally(() => {
+                  isPolishing.current = false;
+                  setIsPolishingState(false);
+                });
+              }
             } else if (msg.type === "done") {
               setTranscribeProgress(100);
             } else if (msg.type === "error") {
@@ -281,6 +399,28 @@ export default function Home() {
     abortControllerRef.current = null;
     setAudioDuration(0);
     setStatus("idle");
+
+    // Trigger final polish after stream transcription completes
+    const finalText = lines.join("");
+    if (finalText) {
+      console.log("[streamTranscribe] done, triggering final polish, length:", finalText.length);
+      setIsPolishingState(true);
+      try {
+        const polishRes = await fetch("/api/polish", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: finalText }),
+        });
+        const polishData = await polishRes.json();
+        if (polishData.text) {
+          setPolishedTranscript(polishData.text);
+          polishedRawLength.current = finalText.length;
+        }
+      } catch (err) {
+        console.error("[polish] error:", err);
+      }
+      setIsPolishingState(false);
+    }
   };
 
   const handleStop = async () => {
@@ -440,13 +580,21 @@ export default function Home() {
     const el = transcriptContainerRef.current;
     if (!el || userScrolledUp.current) return;
     el.scrollTop = el.scrollHeight;
-  }, [transcript]);
+  }, [transcript, polishedTranscript]);
 
   const [mounted, setMounted] = useState(false);
   useEffect(() => { setMounted(true); }, []);
 
   const isRecordingOrPaused = status === "recording" || status === "paused";
   const isBusy = status !== "idle" && !isRecordingOrPaused;
+
+  // Combine: AI polished portion + locally polished remaining raw text
+  const remainingRaw = polishedTranscript
+    ? transcript.slice(polishedRawLength.current)
+    : "";
+  const displayTranscript = polishedTranscript
+    ? polishedTranscript + (remainingRaw ? "\n\n" + localPolish(remainingRaw) : "")
+    : localPolish(transcript);
 
   if (!mounted) {
     return <div className="h-screen flex items-center justify-center bg-background text-muted-foreground">Loading...</div>;
@@ -593,7 +741,17 @@ export default function Home() {
               {isRecordingOrPaused ? (
                 <>
                   {transcript ? (
-                    <div className="text-sm leading-relaxed whitespace-pre-wrap">{transcript}</div>
+                    <div className="space-y-2">
+                      <div className="text-sm leading-relaxed whitespace-pre-wrap">
+                        {displayTranscript}
+                      </div>
+                      {isPolishingState && (
+                        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          <span>AI 潤飾中...</span>
+                        </div>
+                      )}
+                    </div>
                   ) : (
                     <div className="flex items-center justify-center h-full text-muted-foreground">
                       <p className="text-sm">即時轉錄中，每 5 秒更新...</p>
@@ -601,11 +759,21 @@ export default function Home() {
                   )}
                 </>
               ) : transcript ? (
-                <div className="text-sm leading-relaxed whitespace-pre-wrap">{transcript}</div>
+                <div className="space-y-2">
+                  <div className="text-sm leading-relaxed whitespace-pre-wrap">
+                    {displayTranscript}
+                  </div>
+                  {isPolishingState && (
+                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      <span>AI 潤飾中...</span>
+                    </div>
+                  )}
+                </div>
               ) : status === "transcribing" ? (
                 <>
                   {transcript ? (
-                    <div className="text-sm leading-relaxed whitespace-pre-wrap">{transcript}</div>
+                    <div className="text-sm leading-relaxed whitespace-pre-wrap">{displayTranscript}</div>
                   ) : (
                     <div className="flex items-center justify-center h-full">
                       <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
