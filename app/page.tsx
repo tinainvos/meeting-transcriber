@@ -121,7 +121,7 @@ export default function Home() {
   const startLiveTranscription = useCallback(() => {
     liveTranscriptRef.current = setInterval(() => {
       transcribeChunk();
-    }, 10000); // every 10 seconds
+    }, 5000); // every 5 seconds
   }, [transcribeChunk]);
 
   const stopLiveTranscription = useCallback(() => {
@@ -256,11 +256,9 @@ export default function Home() {
               setAudioDuration(msg.duration);
             } else if (msg.type === "line") {
               lines.push(msg.text);
-              setTranscript(lines.join("\n"));
-              const timeMatch = msg.text.match(/^(\d+):(\d+):(\d+)/);
-              if (timeMatch && totalDuration > 0) {
-                const secs = parseInt(timeMatch[1]) * 3600 + parseInt(timeMatch[2]) * 60 + parseInt(timeMatch[3]);
-                setTranscribeProgress(Math.min(Math.round((secs / totalDuration) * 100), 99));
+              setTranscript(lines.join(""));
+              if (msg.secs !== undefined && totalDuration > 0) {
+                setTranscribeProgress(Math.min(Math.round((msg.secs / totalDuration) * 100), 99));
               }
             } else if (msg.type === "done") {
               setTranscribeProgress(100);
@@ -595,19 +593,19 @@ export default function Home() {
               {isRecordingOrPaused ? (
                 <>
                   {transcript ? (
-                    <TranscriptLines text={transcript} />
+                    <div className="text-sm leading-relaxed whitespace-pre-wrap">{transcript}</div>
                   ) : (
                     <div className="flex items-center justify-center h-full text-muted-foreground">
-                      <p className="text-sm">即時轉錄中，每 10 秒更新...</p>
+                      <p className="text-sm">即時轉錄中，每 5 秒更新...</p>
                     </div>
                   )}
                 </>
               ) : transcript ? (
-                <TranscriptLines text={transcript} />
+                <div className="text-sm leading-relaxed whitespace-pre-wrap">{transcript}</div>
               ) : status === "transcribing" ? (
                 <>
                   {transcript ? (
-                    <TranscriptLines text={transcript} />
+                    <div className="text-sm leading-relaxed whitespace-pre-wrap">{transcript}</div>
                   ) : (
                     <div className="flex items-center justify-center h-full">
                       <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />

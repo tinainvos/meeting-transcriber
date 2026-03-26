@@ -61,9 +61,9 @@ export async function POST(request: NextRequest) {
       const processLine = (line: string) => {
         const trimmed = line.trim();
         const match = trimmed.match(/^\[(\d+):(\d+):(\d+)\.\d+\s*-->.*?\]\s*(.*)/);
-        if (match) {
-          const formatted = `${match[1]}:${match[2]}:${match[3]} ${match[4].trim()}`;
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "line", text: formatted })}\n\n`));
+        if (match && match[4].trim()) {
+          const secs = parseInt(match[1]) * 3600 + parseInt(match[2]) * 60 + parseInt(match[3]);
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "line", text: match[4].trim(), secs })}\n\n`));
         }
       };
 

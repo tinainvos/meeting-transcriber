@@ -48,17 +48,17 @@ export async function POST(request: NextRequest) {
       { maxBuffer: 50 * 1024 * 1024, timeout: 600000 }
     );
 
-    // Parse transcript lines
-    const lines = (stdout + stderr)
+    // Parse transcript - extract text only (no timestamps)
+    const text = (stdout + stderr)
       .split("\n")
       .map((line) => {
-        const match = line.trim().match(/^\[(\d+):(\d+):(\d+)\.\d+\s*-->.*?\]\s*(.*)/);
-        return match ? `${match[1]}:${match[2]}:${match[3]} ${match[4].trim()}` : null;
+        const match = line.trim().match(/^\[.*?-->.*?\]\s*(.*)/);
+        return match ? match[1].trim() : null;
       })
-      .filter(Boolean)
-      .join("\n");
+      .filter((s) => s && s.length > 0)
+      .join("");
 
-    return NextResponse.json({ text: lines || "（無法辨識內容）" });
+    return NextResponse.json({ text: text || "（無法辨識內容）" });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: message }, { status: 500 });
