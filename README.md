@@ -9,8 +9,9 @@
 - **即時錄音** — 瀏覽器錄音，支援暫停/繼續/停止
 - **上傳音檔** — 支援 mp3、m4a、wav、webm 等格式
 - **語音轉文字** — 使用 Whisper (whisper-cpp) 本地轉錄，支援中英文
-- **即時轉錄** — 錄音時每 10 秒自動轉錄，文字即時顯示
+- **即時轉錄** — 錄音時每 5 秒自動轉錄，文字即時顯示
 - **串流轉錄** — 上傳音檔時文字逐行出現，附進度條
+- **AI 即時潤飾** — 本地規則即時斷句 + Claude Haiku 背景潤飾，自動加標點與分段
 - **AI 摘要** — 透過 Claude Code CLI 產生結構化會議摘要
 - **AI 即時顧問 (Deep Coach)** — 分析對方意圖、建議話術、注意事項、下一步
 - **會議劇本 (Playbook)** — 匯入 .md 檔自動填入會議資訊
@@ -23,6 +24,7 @@
 ├── MediaRecorder API → 錄音
 ├── /api/transcribe → ffmpeg 轉檔 + whisper-cli 轉文字（即時錄音用）
 ├── /api/transcribe-stream → SSE 串流轉錄（上傳音檔用，逐行回傳）
+├── /api/polish → Claude Haiku 即時潤飾逐字稿（加標點、分段）
 ├── /api/summarize → Claude Code CLI 產生摘要 / Deep Coach 建議
 └── /api/convert-wav → 轉換錄音格式（修正 audio player 時間軸）
 ```
@@ -37,8 +39,11 @@
        │
        ▼
 3. whisper-cli 本地語音轉文字
-   ├── 即時錄音：每 10 秒送一次，文字即時更新
+   ├── 即時錄音：每 5 秒送一次，文字即時更新
    └── 上傳音檔：SSE 串流，文字逐行出現 + 進度條
+       │
+       ▼
+3.5. 本地規則即時斷句 + Claude Haiku 背景潤飾
        │
        ▼
 4. 使用者點擊 ▶ 觸發 Summarize / Deep Coach
@@ -162,4 +167,4 @@ npm run dev
 - **語音轉文字** — whisper-cpp (whisper-cli)
 - **音檔處理** — ffmpeg
 - **AI** — Claude Code CLI
-- **字體** — Google Noto Sans / Noto Sans TC
+- **字體** — Google Nunito (英文) / Noto Sans TC (中文)
